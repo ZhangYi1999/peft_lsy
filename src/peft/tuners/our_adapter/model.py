@@ -3,29 +3,37 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List, Union
+from typing import Any, List, Union, Optional, Tuple
 
+import torch
 import torch.nn as nn
 from peft.tuners.tuners_utils import BaseTuner, check_target_module_exists
 
 from .config import OurAdapterConfig
 from .layer import OurAdapterLayer
 
-def _matches_target(name: str, selectors: List[Union[str, "re.Pattern[str]"]]) -> bool:
-    for sel in selectors:
-        if isinstance(sel, str):
-            if sel == name or name.endswith(f".{sel}") or sel in name.split("."):
-                return True
-        else:
-            if sel.search(name):
-                return True
-    return False
+def extract_layer(current_key: str, key_pattern: str) -> Optional[Tuple[str, int]]:
+    """
+    Returns (layer_name, layer_id) if `key_pattern` matches `current_key`,
+    else returns None.
+
+    key_pattern should contain:
+      - (?P<layer_name>...)   -> e.g. (layers) or (encoders|decoders)
+      - (?P<layer_id>\d+)     -> the numeric id
+    """
+    m = re.search(key_pattern, current_key)
+    if not m:
+        return None
+    layer_name = m.group("layer_name")
+    layer_id = int(m.group("layer_id"))
+    return layer_name, layer_id
+
 
 class OurAdapterModel(BaseTuner):
     """
     PEFT-compatible tuner that injects OurAdapterLayer into target modules.
     """
-    # ------- BaseTuner callbacks --------
+
     @staticmethod
     def _check_target_module_exists(peft_config: OurAdapterConfig, key: str) -> bool:
         return check_target_module_exists(peft_config, key)
@@ -38,18 +46,51 @@ class OurAdapterModel(BaseTuner):
         target_name: str,
         parent: nn.Module,
         current_key: str,
-    ):
-        if not _matches_target(current_key, peft_config.target_modules or []):
-            return
-        wrapper = OurAdapterLayer(
-            model=self,
-            target=target,
-            target_forward=target.forward,
-            layer_number=len(self._our_adapter_layers),
-            config=peft_config,
+        *,
+        parameter_name: Optional[str] = None,
+    ) -> None:
+        if current_key is None:
+            raise ValueError("Current Key shouldn't be `None`")
+        else:
+            target_modules = peft_config.target_modules
+            if isinstance(target_modules, str):
+                layer_name, layer_id = extract_layer(current_key, peft_config.target_modules)
+            else:
+                layer_name, layer_id = extract_layer(current_key, rf"(?P<layer_name>.+)\.(?P<layer_id>\d+)(?:\.[^.]+)*\.{re.escape(target_name)}$")
+
+        # normal situation
+        device_map = self.model.hf_device_map if hasattr(self.model, "hf_device_map") else None
+        new_module = self._create_new_module(peft_config, adapter_name, target, layer_name, layer_id, device_map=device_map)
+        self._replace_module(parent, target_name, new_module, target)
+
+
+    def _replace_module(self, parent, child_name, new_module, child):
+        setattr(parent, child_name, new_module)
+        # It's not necessary to set requires_grad here, as that is handled by
+        # _mark_only_adapters_as_trainable
+
+        # child layer wraps the original module, unpack it
+        if hasattr(child, "base_layer"):
+            child = child.base_layer
+
+        meta = torch.device("meta")
+        # dispatch to correct device
+        for name, module in new_module.named_modules():
+            if self.prefix in name:
+                weight = next(child.parameters())
+            if not any(p.device == meta for p in module.parameters()):
+                module.to(weight.device)
+
+    @staticmethod
+    def _create_new_module(peft_config, adapter_name, target, layer_name, layer_id, **kwargs):
+        new_module = OurAdapterLayer(
+            base_layer=target,
+            peft_config=peft_config,
+            layer_name=layer_name, 
+            layer_id=layer_id
         )
-        target.forward = wrapper.forward  # type: ignore[method-assign]
-        self._our_adapter_layers.append(wrapper)
+
+         
 
     # Add this static method: return the config unchanged
     @staticmethod

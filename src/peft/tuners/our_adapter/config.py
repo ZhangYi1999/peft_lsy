@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import draccus
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, Dict
 import re
 
 from peft.config import PeftConfig
@@ -16,8 +16,7 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
     This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
     
     Args:
-        feature_dim (`int`):
-            The dimension of the input feature. Given an input of shape (B, T, D), D is feature_dim
+        
         max_batches_tracked (`int`):
             How many batches will be tracked to calculate the statistic.
     """
@@ -34,18 +33,27 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
 
 
 @dataclass
-class FuncAdapterConfig(draccus.ChoiceRegistry):
+class FuncAdapterConfig:
     """
     This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
     
     Args:
-        use_trainable_copy (`bool`):
-            whether to copy the module from base model as adapter or not
+        add_zero_init_conv_layer (`bool`):
+            whether to add zero_init conv layer after adapter like ControlNet
+        hidden_dim (`int`):
+            The dimension of the hidden feature of the bottleneck adapter.
         use_lora (`bool`):
             whether to use lora on functional adapter or not
         lora_rank (`int`):
             Lora attention dimension (the "rank").
+        lora_alpha (`int`):
+            The alpha parameter for Lora scaling.
     """
+    hidden_dim:int = None
+    use_lora:bool = False
+    lora_rank: int = 32
+    lora_alpha:int = 32
+
 
 @dataclass
 class OurAdapterConfig(PeftConfig):
@@ -62,32 +70,35 @@ class OurAdapterConfig(PeftConfig):
             chosen according to the model architecture. If the architecture is not known, an error will be raised -- in
             this case, you should specify the target modules manually. To avoid targeting any modules (because you want
             to apply `target_parameters`), set `target_modules=[]`.
+        feature_dim (`int`):
+            The dimension of the input feature. Given an input of shape (B, T, D), D is feature_dim
+        out_feature_dim (`int`):
+            The dimension of the output feature.
         discriminator_cfg (`DiscriminatorConfig`):
             The configuration of Discriminator
+        use_trainable_copy (`bool`):
+            whether to copy the module from base model as adapter or not
         func_adapter_cfg (`FuncAdapterConfig`):
              The configuration of FuncAdapter
     """
-    target_modules: Optional[List[ModuleSelector]] = None
-    inference_mode: bool = False
-    task_type: Optional[str] = None
-    modules_to_save: Optional[List[str]] = None
-
+    target_modules: Optional[List[ModuleSelector]]
+    feature_dim: int = None
+    out_feature_dim: int = None
     discriminator_cfg: DiscriminatorConfig = None
+    use_trainable_copy: bool = False
+    add_zero_init_conv_layer:bool = False
     func_adapter_cfg: FuncAdapterConfig = None
 
-    _default_targets: List[str] = field(default_factory=lambda: [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "up_proj", "down_proj", "gate_proj",
-        "fc1", "fc2", "wo", "wi", "w1", "w2",
-    ])
+    structure: Dict = []
 
     def __post_init__(self) -> None:
         super().__post_init__()
         # Assign to a valid PEFT type so load/save works. It does not alter the tuner name.
         self.peft_type = PeftType.OUR_ADAPTER
-        # Provide sensible defaults if user doesn’t supply target_modules
-        if self.target_modules is None:
-            self.target_modules = list(self._default_targets)
+
+        # out_feature_dim default the same as feature_dim
+        self.out_feature_dim = self.out_feature_dim or self.feature_dim
+
         # Allow `re:` prefix to specify regex
         compiled: List[ModuleSelector] = []
         for sel in self.target_modules:

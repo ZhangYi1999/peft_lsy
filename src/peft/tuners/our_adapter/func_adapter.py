@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from .config import FuncAdapterConfig
 
@@ -23,6 +24,7 @@ class FuncAdapter(nn.Module):
             self.activation = nn.ReLU()
             self.up_proj = nn.Linear(config.hidden_dim, out_feature_dim)
 
+        self.register_buffer("task_id", torch.tensor(-1, dtype=torch.int64))
 
     def forward(self, x):
         if self.use_lora:

@@ -2,12 +2,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import draccus
 from typing import Any, List, Optional, Union, Dict
-import re
 
 from peft.config import PeftConfig
 from peft.utils.peft_types import PeftType
 
 ModuleSelector = Union[str, "re.Pattern[str]"]
+
+@dataclass
+class FuncAdapterConfig:
+    """
+    This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
+
+    Args:
+        hidden_dim (`int`):
+            The dimension of the hidden feature of the bottleneck adapter.
+        use_lora (`bool`):
+            whether to use lora on functional adapter or not
+        lora_rank (`int`):
+            Lora attention dimension (the "rank").
+        lora_alpha (`int`):
+            The alpha parameter for Lora scaling.
+    """
+    hidden_dim: int = field(default=0)
+    use_lora: bool = field(default=False)
+    lora_rank: int = field(default=32)
+    lora_alpha: int = field(default=32)
+
 
 
 @dataclass
@@ -21,7 +41,12 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
             How many batches will be tracked to calculate the statistic.
     """
     feature_dim: int = None
+    feature_fusion: bool = False
+    num_tokens: int = None
+    fused_feature_dim: int = None
     max_batches_tracked: int = 2000
+    use_momentum: bool = True
+    momentum: float = 0.1
 
     @property
     def type(self) -> str:
@@ -32,27 +57,7 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
         return "autoencoder"
 
 
-@dataclass
-class FuncAdapterConfig:
-    """
-    This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
-    
-    Args:
-        add_zero_init_conv_layer (`bool`):
-            whether to add zero_init conv layer after adapter like ControlNet
-        hidden_dim (`int`):
-            The dimension of the hidden feature of the bottleneck adapter.
-        use_lora (`bool`):
-            whether to use lora on functional adapter or not
-        lora_rank (`int`):
-            Lora attention dimension (the "rank").
-        lora_alpha (`int`):
-            The alpha parameter for Lora scaling.
-    """
-    hidden_dim:int = None
-    use_lora:bool = False
-    lora_rank: int = 32
-    lora_alpha:int = 32
+
 
 
 @dataclass
@@ -81,15 +86,16 @@ class OurAdapterConfig(PeftConfig):
         func_adapter_cfg (`FuncAdapterConfig`):
              The configuration of FuncAdapter
     """
-    target_modules: Optional[List[ModuleSelector]]
+    target_modules: Union[list[str], str] = field(default="(?P<layer_name>.+)\.(?P<layer_id>\d+)(?:\.[^.]+)*\.mlp")
     feature_dim: int = None
     out_feature_dim: int = None
+    num_tokens: int = None
     discriminator_cfg: DiscriminatorConfig = None
     use_trainable_copy: bool = False
     add_zero_init_conv_layer:bool = False
     func_adapter_cfg: FuncAdapterConfig = None
 
-    structure: Dict = []
+    structure: Dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -99,11 +105,3 @@ class OurAdapterConfig(PeftConfig):
         # out_feature_dim default the same as feature_dim
         self.out_feature_dim = self.out_feature_dim or self.feature_dim
 
-        # Allow `re:` prefix to specify regex
-        compiled: List[ModuleSelector] = []
-        for sel in self.target_modules:
-            if isinstance(sel, str) and sel.startswith("re:"):
-                compiled.append(re.compile(sel[3:]))
-            else:
-                compiled.append(sel)
-        self.target_modules = compiled

@@ -2,6 +2,7 @@ import abc
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
+import einops
 import numpy as np
 from dataclasses import dataclass
 
@@ -13,28 +14,40 @@ class Discriminator(nn.Module, abc.ABC):
         super().__init__()
 
         self.config = config
-        self.feature_dim = feature_dim
+        self.feature_dim: int = feature_dim
 
-        self.momentum = 0.1
-        self.use_momentum = True
+        self.feature_fusion: bool = config.feature_fusion
 
+        if self.feature_fusion:
+            self.num_tokens: int = config.num_tokens
+            self.fused_feature_dim: int = config.fused_feature_dim if config.fused_feature_dim else self.feature_dim
+
+            self.fusion_layer: nn.Linear = nn.Linear(self.num_tokens * self.feature_dim, self.fused_feature_dim)
+
+        self.use_momentum = config.use_momentum
+        self.momentum = config.momentum
+        
+        self.require_z_score: bool = False
+        self.require_update_stats: bool = False
+        
         self.recording_loss = []
 
         self.register_buffer('running_mean', torch.tensor(0.0, dtype=torch.float32))
         self.register_buffer('running_std', torch.tensor(1.0, dtype=torch.float32))
         self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.int64))
+        self.register_buffer("task_id", torch.tensor(-1, dtype=torch.int64))
+        self.register_buffer("connected_adapter_task_id", torch.tensor(-1, dtype=torch.int64))
 
     def update_stats(self, loss: Tensor):
         # loss should be shape (B, 1) or (B,)
-        assert len(loss.shape) <= 2
+        assert loss.ndim <= 2
 
-        if self.use_momentum:
-            if self.num_batches_tracked < self.config.max_batches_tracked:
+        if self.num_batches_tracked < self.config.max_batches_tracked:
+            if self.use_momentum:
                 self.running_mean = self.momentum * loss.mean() + (1- self.momentum) * self.running_mean
                 self.running_std = self.momentum * loss.std() + (1- self.momentum) * self.running_std
                 self.num_batches_tracked += torch.tensor(1, dtype=torch.int64)
-        else:
-            if self.num_batches_tracked < self.config.max_batches_tracked:
+            else:
                 self.recording_loss.append(loss.mean())
                 losses_tensor = torch.stack(self.recording_loss)
                 self.running_mean = losses_tensor.mean()
@@ -45,11 +58,9 @@ class Discriminator(nn.Module, abc.ABC):
                 self.num_batches_tracked += torch.tensor(1, dtype=torch.int64)
 
     @torch.no_grad
-    def compute_z_score(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        loss, _ = self.forward(x)
-        mean_loss = loss.mean()
+    def compute_z_score(self, mean_loss: Tensor) -> tuple[Tensor, Tensor]:
         z_score = torch.abs((mean_loss - self.running_mean) / self.running_std)
-        return z_score, mean_loss
+        return z_score
     
     @abc.abstractmethod
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
@@ -60,7 +71,8 @@ class Discriminator(nn.Module, abc.ABC):
         raise NotImplementedError
 
 
-@DiscriminatorConfig.register_subclass("autoencoder")
+
+@DiscriminatorConfig.register_subclass('autoencoder')
 @dataclass
 class AutoencoderConfig(DiscriminatorConfig):
     hidden_dim: int = None
@@ -68,15 +80,20 @@ class AutoencoderConfig(DiscriminatorConfig):
 
 
 class AutoEncoder(Discriminator):
-    config_class = AutoencoderConfig
-    name = "autoencoder"
+    config_class: AutoencoderConfig
+    name: str = "autoencoder"
 
     def __init__(self, config: AutoencoderConfig, feature_dim: int):
         super().__init__(config, feature_dim)
 
+        if self.feature_fusion:
+            input_feature_dim = self.fused_feature_dim
+        else:
+            input_feature_dim = feature_dim
+
         # Define the encoder
         self.encoder = nn.Sequential(
-            nn.Linear(feature_dim, config.hidden_dim),
+            nn.Linear(input_feature_dim, config.hidden_dim),
             nn.ReLU(),
             nn.Linear(config.hidden_dim, config.latent_dim),
         )
@@ -85,16 +102,61 @@ class AutoEncoder(Discriminator):
         self.decoder = nn.Sequential(
             nn.Linear(config.latent_dim, config.hidden_dim),
             nn.ReLU(),
-            nn.Linear(config.hidden_dim, feature_dim),
+            nn.Linear(config.hidden_dim, input_feature_dim),
         )
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
-        latent = self.encoder(x)
+
+        if x.ndim == 3 and x.shape[0] == self.num_tokens:
+            batch_first = False
+        else:
+            batch_first = True
+
+        if self.feature_fusion:
+            if x.ndim == 2:
+                expanded_feature = x.unsqueeze(-1) # (B, D) -> (B, 1, D)
+            else:
+                expanded_feature = x
+
+            if batch_first:
+                flattened_feature = einops.rearrange(expanded_feature, "b t d ... -> b (t d) ...")
+            else:
+                flattened_feature = einops.rearrange(expanded_feature, "t b d ... -> b (t d) ...")
+                 
+            input_feature = self.fusion_layer(flattened_feature)
+        else:
+            input_feature = x
+
+        latent = self.encoder(input_feature)
         reconstruction = self.decoder(latent)
 
-        reconstruction_loss = F.mse_loss(reconstruction, x, reduction="none")
+        reconstruction_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
 
-        return reconstruction_loss, {"reconstruction": reconstruction}
+        state_dict = {
+            "reconstruction": reconstruction,
+            "loss": reconstruction_loss,
+            "latent": latent
+        }
+
+        if self.feature_fusion or reconstruction_loss.ndim < 3:
+            mean_loss = reconstruction_loss.mean(dim=(-1)) # (B, D) -> (B,)
+        else:
+            if batch_first:
+                mean_loss = reconstruction_loss.mean(dim=(-2, -1)) # (B, T, D) -> (B,)
+            else:
+                mean_loss = reconstruction_loss.mean(dim=(-3, -1)) # (T, B, D) -> (B,)
+
+        if self.require_z_score:
+            z_score = self.compute_z_score(mean_loss)
+            state_dict["z_score"] = z_score
+        
+        if self.require_update_stats:
+            self.update_stats(mean_loss)
+            state_dict["running_mean"] = self.running_mean
+            state_dict["running_std"] = self.running_std
+            state_dict["num_batches_tracked"] = self.num_batches_tracked
+
+        return mean_loss, state_dict
     
     def unfreeze(self) -> list:
         training_parameters = []
@@ -105,7 +167,6 @@ class AutoEncoder(Discriminator):
         return training_parameters
 
 
-@DiscriminatorConfig.register_subclass("vae")
 @dataclass
 class VAEConfig(DiscriminatorConfig):
     hidden_dim: int = None
@@ -176,12 +237,26 @@ class VariationalAutoEncoder(Discriminator):
 
         state_dict = {
             "reconstruction": reconstruction,
+            "loss": total_loss,
             "mu": mu,
             "logvar": logvar,
             "latent": z,
-            "kl_loss": kl_loss,
+            "kl_loss": kl_loss
         }
-        return total_loss, state_dict
+
+        if self.require_z_score:
+            z_score, mean_loss = self.compute_z_score(total_loss)
+            state_dict["z_score"] = z_score
+        else:
+            mean_loss = total_loss.mean(dim=(-2, -1))
+        
+        if self.require_update_stats:
+            self.update_stats(mean_loss)
+            state_dict["running_mean"] = self.running_mean
+            state_dict["running_std"] = self.running_std
+            state_dict["num_batches_tracked"] = self.num_batches_tracked
+
+        return mean_loss, state_dict
 
     def unfreeze(self) -> list:
         training_parameters = []
@@ -191,7 +266,6 @@ class VariationalAutoEncoder(Discriminator):
         return training_parameters
 
 
-@DiscriminatorConfig.register_subclass("rnd")
 @dataclass
 class RNDConfig(DiscriminatorConfig):
     # MLP sizes
@@ -255,6 +329,7 @@ class RNDDiscriminator(Discriminator):
             "predictor_features": p_feat,
             "rnd_per_sample": rnd_per_sample,
         }
+        
         return rnd_per_feature, state_dict
 
     def train(self, mode: bool = True):

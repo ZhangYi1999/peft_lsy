@@ -34,6 +34,8 @@ class OurAdapterModel(BaseTuner):
     PEFT-compatible tuner that injects OurAdapterLayer into target modules.
     """
 
+    _our_adapter_layers: List[OurAdapterLayer] = []
+
     @staticmethod
     def _check_target_module_exists(peft_config: OurAdapterConfig, key: str) -> bool:
         return check_target_module_exists(peft_config, key)
@@ -73,24 +75,41 @@ class OurAdapterModel(BaseTuner):
         if hasattr(child, "base_layer"):
             child = child.base_layer
 
-        meta = torch.device("meta")
-        # dispatch to correct device
-        for name, module in new_module.named_modules():
-            if self.prefix in name:
-                weight = next(child.parameters())
-            if not any(p.device == meta for p in module.parameters()):
-                module.to(weight.device)
+        # meta = torch.device("meta")
+        # # dispatch to correct device
+        # for name, module in new_module.named_modules():
+        #     if self.prefix in name:
+        #         weight = next(child.parameters())
+        #     if not any(p.device == meta for p in module.parameters()):
+        #         module.to(weight.device)
 
     @staticmethod
     def _create_new_module(peft_config, adapter_name, target, layer_name, layer_id, **kwargs):
+        
+        if layer_name in peft_config.structure:
+            layer_structure = peft_config.structure[layer_name]
+        else:
+            layer_structure = []
+        
         new_module = OurAdapterLayer(
             base_layer=target,
             peft_config=peft_config,
+            adapter_name=adapter_name,
             layer_name=layer_name, 
-            layer_id=layer_id
+            layer_id=layer_id,
+            layer_structure=layer_structure
         )
 
-         
+        return new_module
+
+    def disable_adapter_layers(self):
+        pass
+
+    def enable_adapter_layers(self):
+        pass
+
+    def set_adapter(self, adapter_name: str | list[str]):
+        self.active_adapter = adapter_name
 
     # Add this static method: return the config unchanged
     @staticmethod
@@ -101,55 +120,23 @@ class OurAdapterModel(BaseTuner):
         """
         return peft_config
 
-    def _mark_only_adapters_as_trainable(self):
+    def _mark_only_adapters_as_trainable(self, model: nn.Module) -> None:
         """
         Mark only the adapter parameters as trainable.
         Freeze everything else (already done in __init__).
         This satisfies the BaseTuner abstract method contract.
         """
-        # Ensure base model parameters remain frozen
-        for param in self.model.parameters():
-            param.requires_grad = False
+        for n, p in model.named_parameters():
+            p.requires_grad = False
 
         # Explicitly enable gradients on adapter params
-        for layer in getattr(self, "_our_adapter_layers", []):
-            for p in layer.adapter.trainable_parameters():
+        for layer in self._our_adapter_layers:
+            for p in layer.parameters():
                 p.requires_grad = True
 
     # ------- Convenience controls --------
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
-    def enable_adapter_layers(self) -> None:
-        self.disabled = False
-
-    def disable_adapter_layers(self) -> None:
-        self.disabled = True
-
-    def set_active_task(self, task_idx: int) -> None:
-        for layer in self._our_adapter_layers:
-            layer.adapter.set_active_task(task_idx)
-
-    def set_forward_all(self) -> None:
-        for layer in self._our_adapter_layers:
-            layer.adapter.set_forward_all()
-
-    def set_forward(self, block_id: int, disc_id: int) -> None:
-        for layer in self._our_adapter_layers:
-            layer.adapter.set_forward(block_id, disc_id)
-
-    def add_discriminators(self, block_id: int, num_discriminators: int) -> None:
-        for layer in self._our_adapter_layers:
-            layer.adapter.add_discriminators(block_id, num_discriminators)
-
-    def add_adapters(self, num_blocks: int) -> None:
-        for layer in self._our_adapter_layers:
-            layer.adapter.add_adapters(num_blocks)
-
-    def trainable_parameters(self):
-        params = []
-        for layer in self._our_adapter_layers:
-            params += layer.adapter.trainable_parameters()
-        return params
 
     

@@ -4,7 +4,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 import einops
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import DiscriminatorConfig
 
@@ -37,6 +37,7 @@ class Discriminator(nn.Module, abc.ABC):
         self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.int64))
         self.register_buffer("task_id", torch.tensor(-1, dtype=torch.int64))
         self.register_buffer("connected_adapter_task_id", torch.tensor(-1, dtype=torch.int64))
+        self.register_buffer("connected_adapter_indices", torch.tensor(-1, dtype=torch.int64))
 
     def update_stats(self, loss: Tensor):
         # loss should be shape (B, 1) or (B,)
@@ -78,6 +79,10 @@ class AutoencoderConfig(DiscriminatorConfig):
     hidden_dim: int = None
     latent_dim: int = None
 
+    use_lora: bool = field(default=False)
+    lora_rank: int = field(default=32)
+    lora_alpha: int = field(default=32)
+
 
 class AutoEncoder(Discriminator):
     config_class: AutoencoderConfig
@@ -91,23 +96,64 @@ class AutoEncoder(Discriminator):
         else:
             input_feature_dim = feature_dim
 
-        # Define the encoder
-        self.encoder = nn.Sequential(
-            nn.Linear(input_feature_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.latent_dim),
-        )
-        
-        # Define the decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(config.latent_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, input_feature_dim),
-        )
+        self.use_lora = config.use_lora
+
+        if self.use_lora:
+            # LoRA parameters
+            rank = config.lora_rank
+            alpha = config.lora_alpha
+            self.scaling = alpha / rank
+
+            # Encoder (LoRA style)
+            self.encoder_down_A = nn.Linear(input_feature_dim, rank, bias=False)
+            self.encoder_down_B = nn.Linear(rank, config.hidden_dim, bias=True)
+            self.encoder_activation = nn.ReLU()
+            self.encoder_up_A = nn.Linear(config.hidden_dim, rank, bias=False)
+            self.encoder_up_B = nn.Linear(rank, config.latent_dim, bias=True)
+
+            # Decoder (LoRA style)
+            self.decoder_down_A = nn.Linear(config.latent_dim, rank, bias=False)
+            self.decoder_down_B = nn.Linear(rank, config.hidden_dim, bias=True)
+            self.decoder_activation = nn.ReLU()
+            self.decoder_up_A = nn.Linear(config.hidden_dim, rank, bias=False)
+            self.decoder_up_B = nn.Linear(rank, input_feature_dim, bias=True)
+
+        else:
+            # Normal Encoder
+            self.encoder = nn.Sequential(
+                nn.Linear(input_feature_dim, config.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(config.hidden_dim, config.latent_dim),
+            )
+
+            # Normal Decoder
+            self.decoder = nn.Sequential(
+                nn.Linear(config.latent_dim, config.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(config.hidden_dim, input_feature_dim),
+            )
+
+    def encode(self, x: Tensor) -> Tensor:
+        if self.use_lora:
+            x = self.encoder_down_B(self.encoder_down_A(x)) * self.scaling
+            x = self.encoder_activation(x)
+            x = self.encoder_up_B(self.encoder_up_A(x)) * self.scaling
+            return x
+        else:
+            return self.encoder(x)
+
+    def decode(self, z: Tensor) -> Tensor:
+        if self.use_lora:
+            z = self.decoder_down_B(self.decoder_down_A(z)) * self.scaling
+            z = self.decoder_activation(z)
+            z = self.decoder_up_B(self.decoder_up_A(z)) * self.scaling
+            return z
+        else:
+            return self.decoder(z)
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
 
-        if x.ndim == 3 and x.shape[0] == self.num_tokens:
+        if x.ndim == 3 and x.shape[0] == self.config.num_tokens:
             batch_first = False
         else:
             batch_first = True
@@ -127,8 +173,8 @@ class AutoEncoder(Discriminator):
         else:
             input_feature = x
 
-        latent = self.encoder(input_feature)
-        reconstruction = self.decoder(latent)
+        latent = self.encode(input_feature)
+        reconstruction = self.decode(latent)
 
         reconstruction_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
 

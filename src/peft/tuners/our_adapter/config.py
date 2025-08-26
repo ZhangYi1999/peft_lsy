@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 import draccus
 from typing import Any, List, Optional, Union, Dict
 
+import draccus.parsers
+
 from peft.config import PeftConfig
 from peft.utils.peft_types import PeftType
 
@@ -56,10 +58,6 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
     def default_choice_name(cls) -> str | None:
         return "autoencoder"
 
-
-
-
-
 @dataclass
 class OurAdapterConfig(PeftConfig):
     """
@@ -94,7 +92,7 @@ class OurAdapterConfig(PeftConfig):
     use_trainable_copy: bool = False
     add_zero_init_conv_layer:bool = False
     func_adapter_cfg: FuncAdapterConfig = None
-
+    num_learned_task: int = 0
     structure: Dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -104,4 +102,13 @@ class OurAdapterConfig(PeftConfig):
 
         # out_feature_dim default the same as feature_dim
         self.out_feature_dim = self.out_feature_dim or self.feature_dim
+
+        if isinstance(self.func_adapter_cfg, dict):
+            self.func_adapter_cfg = FuncAdapterConfig(**self.func_adapter_cfg)
+
+        if isinstance(self.discriminator_cfg, dict):
+            discriminator_cfg = self.discriminator_cfg
+            discriminator_type = discriminator_cfg.pop("type")
+
+            self.discriminator_cfg = DiscriminatorConfig.get_choice_class(discriminator_type)(**discriminator_cfg)
 

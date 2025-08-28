@@ -32,6 +32,8 @@ class Discriminator(nn.Module, abc.ABC):
         
         self.recording_loss = []
 
+        self.info_dict_keys = None
+
         self.register_buffer('running_mean', torch.tensor(0.0, dtype=torch.float32))
         self.register_buffer('running_std', torch.tensor(1.0, dtype=torch.float32))
         self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.int64))
@@ -43,7 +45,8 @@ class Discriminator(nn.Module, abc.ABC):
         # loss should be shape (B, 1) or (B,)
         assert loss.ndim <= 2
 
-        if self.num_batches_tracked < self.config.max_batches_tracked:
+        max_batches_tracked = torch.tensor(self.config.max_batches_tracked, dtype=torch.int64)
+        if self.num_batches_tracked < max_batches_tracked:
             if self.use_momentum:
                 self.running_mean = self.momentum * loss.mean() + (1- self.momentum) * self.running_mean
                 self.running_std = self.momentum * loss.std() + (1- self.momentum) * self.running_std
@@ -53,7 +56,7 @@ class Discriminator(nn.Module, abc.ABC):
                 losses_tensor = torch.stack(self.recording_loss)
                 self.running_mean = losses_tensor.mean()
 
-                if self.num_batches_tracked > 0 and len(self.recording_loss) > 1:
+                if self.num_batches_tracked > torch.tensor(0, dtype=torch.int64) and len(self.recording_loss) > 1:
                     self.running_std = losses_tensor.std()
 
                 self.num_batches_tracked += torch.tensor(1, dtype=torch.int64)
@@ -153,18 +156,13 @@ class AutoEncoder(Discriminator):
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
 
-        if x.ndim == 3 and x.shape[0] == self.config.num_tokens:
-            batch_first = False
-        else:
-            batch_first = True
-
         if self.feature_fusion:
             if x.ndim == 2:
                 expanded_feature = x.unsqueeze(-1) # (B, D) -> (B, 1, D)
             else:
                 expanded_feature = x
 
-            if batch_first:
+            if self.config.batch_first:
                 flattened_feature = einops.rearrange(expanded_feature, "b t d ... -> b (t d) ...")
             else:
                 flattened_feature = einops.rearrange(expanded_feature, "t b d ... -> b (t d) ...")
@@ -178,7 +176,7 @@ class AutoEncoder(Discriminator):
 
         reconstruction_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
 
-        state_dict = {
+        info_dict = {
             "reconstruction": reconstruction,
             "loss": reconstruction_loss,
             "latent": latent
@@ -187,22 +185,24 @@ class AutoEncoder(Discriminator):
         if self.feature_fusion or reconstruction_loss.ndim < 3:
             mean_loss = reconstruction_loss.mean(dim=(-1)) # (B, D) -> (B,)
         else:
-            if batch_first:
+            if self.config.batch_first:
                 mean_loss = reconstruction_loss.mean(dim=(-2, -1)) # (B, T, D) -> (B,)
             else:
                 mean_loss = reconstruction_loss.mean(dim=(-3, -1)) # (T, B, D) -> (B,)
 
         if self.require_z_score:
             z_score = self.compute_z_score(mean_loss)
-            state_dict["z_score"] = z_score
+            info_dict["z_score"] = z_score
         
         if self.require_update_stats:
             self.update_stats(mean_loss)
-            state_dict["running_mean"] = self.running_mean
-            state_dict["running_std"] = self.running_std
-            state_dict["num_batches_tracked"] = self.num_batches_tracked
+            info_dict["running_mean"] = self.running_mean
+            info_dict["running_std"] = self.running_std
+            info_dict["num_batches_tracked"] = self.num_batches_tracked
 
-        return mean_loss, state_dict
+        self.info_dict_keys = info_dict.keys()
+
+        return mean_loss, info_dict
     
     def unfreeze(self) -> list:
         training_parameters = []
@@ -281,7 +281,7 @@ class VariationalAutoEncoder(Discriminator):
 
         total_loss = recon_loss + kl_expanded
 
-        state_dict = {
+        info_dict = {
             "reconstruction": reconstruction,
             "loss": total_loss,
             "mu": mu,
@@ -292,17 +292,17 @@ class VariationalAutoEncoder(Discriminator):
 
         if self.require_z_score:
             z_score, mean_loss = self.compute_z_score(total_loss)
-            state_dict["z_score"] = z_score
+            info_dict["z_score"] = z_score
         else:
             mean_loss = total_loss.mean(dim=(-2, -1))
         
         if self.require_update_stats:
             self.update_stats(mean_loss)
-            state_dict["running_mean"] = self.running_mean
-            state_dict["running_std"] = self.running_std
-            state_dict["num_batches_tracked"] = self.num_batches_tracked
+            info_dict["running_mean"] = self.running_mean
+            info_dict["running_std"] = self.running_std
+            info_dict["num_batches_tracked"] = self.num_batches_tracked
 
-        return mean_loss, state_dict
+        return mean_loss, info_dict
 
     def unfreeze(self) -> list:
         training_parameters = []
@@ -370,13 +370,13 @@ class RNDDiscriminator(Discriminator):
         # Broadcast to per-feature like AE: [B, F]
         rnd_per_feature = (self.beta * rnd_per_sample).unsqueeze(1) / x.size(1)
 
-        state_dict = {
+        info_dict = {
             "target_features": t_feat,
             "predictor_features": p_feat,
             "rnd_per_sample": rnd_per_sample,
         }
         
-        return rnd_per_feature, state_dict
+        return rnd_per_feature, info_dict
 
     def train(self, mode: bool = True):
         # keep target frozen & in eval regardless of outer mode

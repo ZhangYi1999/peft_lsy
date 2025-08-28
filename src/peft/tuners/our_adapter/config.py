@@ -43,6 +43,7 @@ class DiscriminatorConfig(draccus.ChoiceRegistry):
             How many batches will be tracked to calculate the statistic.
     """
     feature_dim: int = None
+    batch_first: bool = True
     feature_fusion: bool = False
     num_tokens: int = None
     fused_feature_dim: int = None
@@ -87,7 +88,7 @@ class OurAdapterConfig(PeftConfig):
     target_modules: Union[list[str], str] = field(default="(?P<layer_name>.+)\.(?P<layer_id>\d+)(?:\.[^.]+)*\.mlp")
     feature_dim: int = None
     out_feature_dim: int = None
-    num_tokens: int = None
+    batch_first: bool = True
     discriminator_cfg: DiscriminatorConfig = None
     use_trainable_copy: bool = False
     add_zero_init_conv_layer:bool = False

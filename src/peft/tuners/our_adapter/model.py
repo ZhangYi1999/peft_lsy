@@ -96,7 +96,7 @@ class OurAdapterModel(BaseTuner):
                 else:
                     weight = next(child.parameters())
                 if not any(p.device == meta for p in module.parameters()):
-                    module.to(weight.device)
+                    module.to(device=weight.device, dtype=weight.dtype)
 
     @staticmethod
     def _create_new_module(peft_config, adapter_name, target, layer_name, layer_id, base_layer_name, **kwargs):

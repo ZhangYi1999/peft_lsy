@@ -92,6 +92,11 @@ class PeftConfigMixin(PushToHubMixin):
         auto_mapping_dict = kwargs.pop("auto_mapping_dict", None)
 
         output_dict = self.to_dict()
+        
+        # handle our adapter config
+        if "discriminator_cfg" in output_dict:
+            output_dict["discriminator_cfg"]["type"] = self.discriminator_cfg.type
+        
         # converting set type to list
         for key, value in output_dict.items():
             if isinstance(value, set):

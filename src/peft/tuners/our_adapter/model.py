@@ -27,8 +27,12 @@ def extract_layer(current_key: str, key_pattern: str) -> Optional[Tuple[str, int
     m = re.search(key_pattern, current_key)
     if not m:
         return None
-    layer_name = m.group("layer_name")
-    layer_id = int(m.group("layer_id"))
+    if "layer_name" in m.re.groupindex and "layer_id" in m.re.groupindex:
+        layer_name = m.group("layer_name")
+        layer_id = int(m.group("layer_id"))
+    else:
+        layer_name = m.group(0)
+        layer_id = 0
     return layer_name, layer_id
 
 

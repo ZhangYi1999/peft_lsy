@@ -194,11 +194,12 @@ class AutoEncoder(Discriminator):
             z_score = self.compute_z_score(mean_loss)
             info_dict["z_score"] = z_score
         
-        if self.require_update_stats:
+        if self.require_update_stats and self.training:
             self.update_stats(mean_loss)
-            info_dict["running_mean"] = self.running_mean
-            info_dict["running_std"] = self.running_std
-            info_dict["num_batches_tracked"] = self.num_batches_tracked
+        
+        info_dict["running_mean"] = self.running_mean
+        info_dict["running_std"] = self.running_std
+        info_dict["num_batches_tracked"] = self.num_batches_tracked
 
         self.info_dict_keys = info_dict.keys()
 

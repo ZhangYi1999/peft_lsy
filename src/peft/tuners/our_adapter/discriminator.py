@@ -41,6 +41,7 @@ class Discriminator(nn.Module, abc.ABC):
         self.register_buffer("connected_adapter_task_id", torch.tensor(-1, dtype=torch.int64))
         self.register_buffer("connected_adapter_indices", torch.tensor(-1, dtype=torch.int64))
 
+    @torch.no_grad
     def update_stats(self, loss: Tensor):
         # loss should be shape (B, 1) or (B,)
         assert loss.ndim <= 2

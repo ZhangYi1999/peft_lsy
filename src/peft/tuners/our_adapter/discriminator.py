@@ -214,6 +214,101 @@ class AutoEncoder(Discriminator):
 
         return training_parameters
 
+
+@DiscriminatorConfig.register_subclass('autoencoder_small')
+@dataclass
+class AutoencoderSmallConfig(DiscriminatorConfig):
+    hidden_dim: int = None
+
+
+class AutoEncoderSmall(Discriminator):
+    config_class: AutoencoderSmallConfig
+    name: str = "autoencoder_small"
+
+    def __init__(self, config: AutoencoderSmallConfig, feature_dim: int):
+        super().__init__(config, feature_dim)
+
+        if self.feature_fusion:
+            input_feature_dim = self.fused_feature_dim
+        else:
+            input_feature_dim = feature_dim
+
+        
+        self.encoder = nn.Sequential(
+            nn.Linear(input_feature_dim, config.hidden_dim),
+            nn.ReLU()
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Linear(config.hidden_dim, input_feature_dim),
+        )
+
+    def encode(self, x: Tensor) -> Tensor:
+        return self.encoder(x)
+
+    def decode(self, z: Tensor) -> Tensor:
+        return self.decoder(z)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, dict]:
+
+        if self.feature_fusion:
+            if x.ndim == 2:
+                expanded_feature = x.unsqueeze(-1) # (B, D) -> (B, 1, D)
+            else:
+                expanded_feature = x
+
+            if self.config.batch_first:
+                flattened_feature = einops.rearrange(expanded_feature, "b t d ... -> b (t d) ...")
+            else:
+                flattened_feature = einops.rearrange(expanded_feature, "t b d ... -> b (t d) ...")
+                 
+            input_feature = self.fusion_layer(flattened_feature)
+        else:
+            input_feature = x
+
+        latent = self.encode(input_feature)
+        reconstruction = self.decode(latent)
+
+        reconstruction_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
+
+        info_dict = {
+            "reconstruction": reconstruction,
+            "loss": reconstruction_loss,
+            "latent": latent
+        }
+
+        if self.feature_fusion or reconstruction_loss.ndim < 3:
+            mean_loss = reconstruction_loss.mean(dim=(-1)) # (B, D) -> (B,)
+        else:
+            if self.config.batch_first:
+                mean_loss = reconstruction_loss.mean(dim=(-2, -1)) # (B, T, D) -> (B,)
+            else:
+                mean_loss = reconstruction_loss.mean(dim=(-3, -1)) # (T, B, D) -> (B,)
+
+        if self.require_z_score:
+            z_score = self.compute_z_score(mean_loss)
+            info_dict["z_score"] = z_score
+        
+        if self.require_update_stats and self.training:
+            self.update_stats(mean_loss)
+        
+        info_dict["running_mean"] = self.running_mean
+        info_dict["running_std"] = self.running_std
+        info_dict["num_batches_tracked"] = self.num_batches_tracked
+
+        self.info_dict_keys = info_dict.keys()
+
+        return mean_loss, info_dict
+    
+    def unfreeze(self) -> list:
+        training_parameters = []
+        for parameter in self.parameters():
+            parameter.requires_grad = True
+            training_parameters.append(parameter)
+
+        return training_parameters
+
+
 @DiscriminatorConfig.register_subclass('vae')
 @dataclass
 class VAEConfig(DiscriminatorConfig):
@@ -428,6 +523,8 @@ def get_discriminaor_class(name: str) -> Discriminator:
     """Get the discriminaor's class and config class given a name (matching the discriminaor class' `name` attribute)."""
     if name == "autoencoder":
         return AutoEncoder
+    elif name == "autoencoder_small":
+        return AutoEncoderSmall
     elif name == "vae":
         return VariationalAutoEncoder
     else:

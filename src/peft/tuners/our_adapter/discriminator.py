@@ -214,7 +214,7 @@ class AutoEncoder(Discriminator):
 
         return training_parameters
 
-
+@DiscriminatorConfig.register_subclass('vae')
 @dataclass
 class VAEConfig(DiscriminatorConfig):
     hidden_dim: int = None
@@ -258,7 +258,22 @@ class VariationalAutoEncoder(Discriminator):
         return mu + eps * std
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
-        h = self.encoder(x)
+        if self.feature_fusion:
+            if x.ndim == 2:
+                expanded_feature = x.unsqueeze(-1) # (B, D) -> (B, 1, D)
+            else:
+                expanded_feature = x
+
+            if self.config.batch_first:
+                flattened_feature = einops.rearrange(expanded_feature, "b t d ... -> b (t d) ...")
+            else:
+                flattened_feature = einops.rearrange(expanded_feature, "t b d ... -> b (t d) ...")
+                 
+            input_feature = self.fusion_layer(flattened_feature)
+        else:
+            input_feature = x
+
+        h = self.encoder(input_feature)
         mu = self.enc_mu(h)
         logvar = self.enc_logvar(h)
 
@@ -272,14 +287,14 @@ class VariationalAutoEncoder(Discriminator):
         reconstruction = self.decoder(z)
 
         # Per-element reconstruction loss (same as AE)
-        recon_loss = F.mse_loss(reconstruction, x, reduction="none")
+        recon_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
 
         # KL divergence per sample: shape [batch]
         # KL(N(mu, sigma) || N(0, I)) = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - torch.exp(logvar), dim=1)
 
         # Make KL term broadcastable to per-feature loss: distribute evenly across features
-        kl_expanded = (self.beta * kl_loss).unsqueeze(1) / x.size(1)
+        kl_expanded = (self.beta * kl_loss).unsqueeze(1) / input_feature.size(1)
 
         total_loss = recon_loss + kl_expanded
 
@@ -292,17 +307,26 @@ class VariationalAutoEncoder(Discriminator):
             "kl_loss": kl_loss
         }
 
-        if self.require_z_score:
-            z_score, mean_loss = self.compute_z_score(total_loss)
-            info_dict["z_score"] = z_score
+        if self.feature_fusion or total_loss.ndim < 3:
+            mean_loss = total_loss.mean(dim=(-1)) # (B, D) -> (B,)
         else:
-            mean_loss = total_loss.mean(dim=(-2, -1))
+            if self.config.batch_first:
+                mean_loss = total_loss.mean(dim=(-2, -1)) # (B, T, D) -> (B,)
+            else:
+                mean_loss = total_loss.mean(dim=(-3, -1)) # (T, B, D) -> (B,)
+
+        if self.require_z_score:
+            z_score = self.compute_z_score(mean_loss)
+            info_dict["z_score"] = z_score
         
-        if self.require_update_stats:
+        if self.require_update_stats and self.training:
             self.update_stats(mean_loss)
-            info_dict["running_mean"] = self.running_mean
-            info_dict["running_std"] = self.running_std
-            info_dict["num_batches_tracked"] = self.num_batches_tracked
+        
+        info_dict["running_mean"] = self.running_mean
+        info_dict["running_std"] = self.running_std
+        info_dict["num_batches_tracked"] = self.num_batches_tracked
+
+        self.info_dict_keys = info_dict.keys()
 
         return mean_loss, info_dict
 

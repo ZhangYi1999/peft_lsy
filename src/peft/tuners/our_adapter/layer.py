@@ -128,6 +128,7 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
 
             top_1_idx_list = torch.argmin(losses, dim=0).tolist()
 
+            self._info_dicts["losses"] = losses.transpose(0, 1) # (n_discriminators, n_envs) -> (n_envs, n_discriminators)
             self._info_dicts["top_1_idx_list"] = top_1_idx_list
 
             for top_1_idx in top_1_idx_list:

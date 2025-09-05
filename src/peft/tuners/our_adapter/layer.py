@@ -35,14 +35,17 @@ class FuncAdapterWrapper(nn.Module):
                 padding=0
             )
 
-            zero_init_conv_layer = torch.nn.init.zeros_(conv_layer)
+            # Initialize weights and bias to zero
+            nn.init.constant_(conv_layer.weight, 0.0)
+            if conv_layer.bias is not None:
+                nn.init.constant_(conv_layer.bias, 0.0)
 
-            self.func_adapter = nn.Sequential([
+            self.func_adapter = nn.Sequential(
                 adapter,
                 ConvHelper(),
-                zero_init_conv_layer,
+                conv_layer,
                 ConvHelper()
-            ])
+            )
         else:
             self.func_adapter = adapter
 

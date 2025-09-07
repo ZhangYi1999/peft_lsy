@@ -197,6 +197,8 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
                 self.peft_config.feature_dim, 
                 self.peft_config.out_feature_dim
             )
+        for p in adapter.parameters():
+            p.requires_grad = True
         return FuncAdapterWrapper(self.peft_config, adapter)
     
     def _create_discriminator(self):

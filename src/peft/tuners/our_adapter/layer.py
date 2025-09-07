@@ -26,6 +26,8 @@ class FuncAdapterWrapper(nn.Module):
                  adapter: nn.Module):
         super().__init__()
 
+        self.add_zero_init_conv_layer = config.add_zero_init_conv_layer
+
         if config.add_zero_init_conv_layer:
 
             conv_layer = nn.Conv1d(
@@ -50,7 +52,13 @@ class FuncAdapterWrapper(nn.Module):
             self.func_adapter = adapter
 
     def forward(self, x):
-        return self.func_adapter(x)
+        if x.ndim == 2 and self.add_zero_init_conv_layer:
+            x = x.squeeze(0)
+            y = self.func_adapter(x)
+            y = y.unsqueeze(0)
+            return y
+        else:
+            return self.func_adapter(x)
 
 
 

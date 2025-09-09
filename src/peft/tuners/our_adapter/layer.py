@@ -214,7 +214,7 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
 
         adapter_parameter = list(new_adapter.parameters())
             
-        discriminator_parameter = self.add_discriminator(new_task_id, new_task_id)
+        discriminator_parameter = self.add_discriminator(self.num_adapters - 1, new_task_id)
 
         return adapter_parameter, discriminator_parameter
 
@@ -239,8 +239,9 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
             discriminator.require_z_score = require_z_score
 
     def update_stats(self, require_update_stats:bool):
-        for discriminator in self.our_adapter_discriminators[self.adapter_name]:
-            discriminator.require_update_stats = require_update_stats
+        self.our_adapter_discriminators[self.adapter_name][self._forwarded_discriminator_id].require_update_stats = require_update_stats
+        # for discriminator in self.our_adapter_discriminators[self.adapter_name]:
+        #     discriminator.require_update_stats = require_update_stats
 
     def get_adapter_id_by_discriminator_id(self, discriminator_id):
         return self.our_adapter_discriminators[self.adapter_name][discriminator_id].connected_adapter_indices.item()

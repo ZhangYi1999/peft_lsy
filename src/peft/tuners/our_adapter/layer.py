@@ -14,6 +14,8 @@ from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
 
 from .func_adapter import FuncAdapter
 
+STACK_FORWARD = False
+
 class ConvHelper(nn.Module):
     """Swap dims: (B, T, D) <-> (B, D, T)."""
     def forward(self, x):
@@ -130,40 +132,83 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
         else:
             # during evaluation
 
-            losses, info_dicts = self._forward_discriminators_parallelly(x)
+            global STACK_FORWARD
 
-            for indice, info_dict in enumerate(info_dicts):
-                self._info_dicts[f"discriminator_{indice}"] = info_dict
+            if STACK_FORWARD:
 
-            batched_func_adapters = []
+                losses, info_dicts = self._forward_discriminators_parallelly(x)
+                
 
-            top_1_idx_list = torch.argmin(losses, dim=0).tolist()
+                for indice, info_dict in enumerate(info_dicts):
+                    self._info_dicts[f"discriminator_{indice}"] = info_dict
 
-            self._info_dicts["losses"] = losses.transpose(0, 1) # (n_discriminators, n_envs) -> (n_envs, n_discriminators)
-            self._info_dicts["top_1_idx_list"] = top_1_idx_list
+                batched_func_adapters = []
 
-            for top_1_idx in top_1_idx_list:
-                func_idx = self.our_adapter_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices
-                batched_func_adapters.append(self.our_adapter_func_adapters[self.adapter_name][func_idx])
+                top_1_idx_list = torch.argmin(losses, dim=0).tolist()
 
-            params, buffers = stack_module_state(batched_func_adapters)
-            prototype = batched_func_adapters[0]
+                self._info_dicts["losses"] = losses.transpose(0, 1) # (n_discriminators, n_envs) -> (n_envs, n_discriminators)
+                self._info_dicts["top_1_idx_list"] = top_1_idx_list
 
-            def forward_one_func_adapter(params_i, buffers_i, input_i):
-                y = functional_call(prototype, (params_i, buffers_i), (input_i,))
-                return y
+                for top_1_idx in top_1_idx_list:
+                    func_idx = self.our_adapter_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices
+                    batched_func_adapters.append(self.our_adapter_func_adapters[self.adapter_name][func_idx])
+
+                params, buffers = stack_module_state(batched_func_adapters)
+                prototype = batched_func_adapters[0]
+
+                def forward_one_func_adapter(params_i, buffers_i, input_i):
+                    y = functional_call(prototype, (params_i, buffers_i), (input_i,))
+                    return y
+                
+                if not self.peft_config.batch_first:
+                    adapter_input = einops.rearrange(x, "t b d ... -> b t d ... ")
+                else:
+                    adapter_input = x
+                
+                adapter_result = vmap(forward_one_func_adapter)(params, buffers, adapter_input)
+
+                if not self.peft_config.batch_first:
+                    adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
             
-            if not self.peft_config.batch_first:
-                adapter_input = einops.rearrange(x, "t b d ... -> b t d ... ")
             else:
-                adapter_input = x
-            
-            adapter_result = vmap(forward_one_func_adapter)(params, buffers, adapter_input)
+                losses, info_dicts = self._forward_discriminators(x)
 
-            if not self.peft_config.batch_first:
-                adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
+                for indice, info_dict in enumerate(info_dicts):
+                    self._info_dicts[f"discriminator_{indice}"] = info_dict
+
+                top_1_idx_list = torch.argmin(losses, dim=0).tolist()
+
+                self._info_dicts["losses"] = losses.transpose(0, 1) # (n_discriminators, n_envs) -> (n_envs, n_discriminators)
+                self._info_dicts["top_1_idx_list"] = top_1_idx_list
+
+                if not self.peft_config.batch_first:
+                    adapter_input = einops.rearrange(x, "t b d ... -> b t d ... ")
+                else:
+                    adapter_input = x
+
+                for top_1_idx in top_1_idx_list:
+                    func_idx = self.our_adapter_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices
+                    adapter_result = self.our_adapter_func_adapters[self.adapter_name][func_idx](adapter_input)
+
+                if not self.peft_config.batch_first:
+                    adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
 
         return adapter_result
+
+    def _forward_discriminators(self, x: torch.Tensor):
+
+        losses = []
+        info_dicts = []
+
+        for discriminator in self.our_adapter_discriminators[self.adapter_name]:
+            loss, info_dict = discriminator(x)
+            losses.append(loss)
+            info_dicts.append(info_dict)
+
+        losses = torch.stack(losses, dim=0)
+
+        return losses, info_dicts
+
 
     def _forward_discriminators_parallelly(self, x: torch.Tensor):
         params, buffers = stack_module_state(self.our_adapter_discriminators[self.adapter_name])

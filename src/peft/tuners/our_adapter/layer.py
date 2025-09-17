@@ -127,6 +127,15 @@ class OurAdapterLayer(nn.Module, BaseTunerLayer):
                     discriminator_id = self._forwarded_discriminator_id
                 self._info_dicts[f"discriminator_{discriminator_id}"] = info_dict
 
+                for indice, discriminator in enumerate(self.our_adapter_discriminators[self.adapter_name]):
+                    if indice != discriminator_id:
+                        info_dict = {
+                            "running_mean" : discriminator.running_mean,
+                            "running_std" : discriminator.running_std,
+                            "num_batches_tracked" : discriminator.num_batches_tracked,
+                        }
+                        self._info_dicts[f"discriminator_{indice}"] = info_dict
+
             # forward specific adapter
             adapter_result = self.our_adapter_func_adapters[self.adapter_name][self._forwarded_adapter_id](x)
         else:

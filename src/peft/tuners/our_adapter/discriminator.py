@@ -46,8 +46,10 @@ class Discriminator(nn.Module, abc.ABC):
         # loss should be shape (B, 1) or (B,)
         assert loss.ndim <= 2
 
+        print(loss.shape)
+
         max_batches_tracked = torch.tensor(self.config.max_batches_tracked, dtype=torch.int64)
-        if self.num_batches_tracked < max_batches_tracked:
+        if self.num_batches_tracked < max_batches_tracked and loss.numel() > 1:
             if self.use_momentum:
                 self.running_mean = self.momentum * loss.mean() + (1- self.momentum) * self.running_mean
                 self.running_std = self.momentum * loss.std() + (1- self.momentum) * self.running_std

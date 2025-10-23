@@ -56,6 +56,8 @@ from .tuners import (
     BoneModel,
     C3AConfig,
     C3AModel,
+    CLAREConfig, # edited
+    CLAREModel,  # edited
     CPTConfig,
     CPTEmbedding,
     EvaConfig,
@@ -147,6 +149,8 @@ __all__ = [
     "BoneModel",
     "C3AConfig",
     "C3AModel",
+    "CLAREConfig", # edited
+    "CLAREModel", # edited
     "CPTConfig",
     "CPTEmbedding",
     "EvaConfig",

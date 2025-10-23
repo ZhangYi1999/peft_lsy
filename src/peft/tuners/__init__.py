@@ -51,6 +51,7 @@ from .xlora import XLoraConfig, XLoraModel
 # peft/tuners/__init__.py
 
 from .our_adapter import OurAdapterConfig, OurAdapterModel  # add this
+from .clare import CLAREConfig, CLAREModel # add this
 
 __all__ = [
     "AdaLoraConfig",
@@ -63,6 +64,8 @@ __all__ = [
     "BoneModel",
     "C3AConfig",
     "C3AModel",
+    "CLAREConfig", # edited
+    "CLAREModel", # edited
     "CPTConfig",
     "CPTEmbedding",
     "EvaConfig",

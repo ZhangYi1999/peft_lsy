@@ -105,7 +105,7 @@ class FuncAdapterWrapper(nn.Module):
 
 
 # ---- Layer wrapper: base + adapter ----
-class CLARE(nn.Module, BaseTunerLayer):
+class CLARELayer(nn.Module, BaseTunerLayer):
     def __init__(
         self,
         base_layer: nn.Module,

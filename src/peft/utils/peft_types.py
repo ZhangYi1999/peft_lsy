@@ -73,7 +73,8 @@ class PeftType(str, enum.Enum):
     TRAINABLE_TOKENS = "TRAINABLE_TOKENS"
     SHIRA = "SHIRA"
     C3A = "C3A"
-    OUR_ADAPTER = "OUR_ADAPTER"
+    OUR_ADAPTER = "OUR_ADAPTER" # add
+    CLARE = "CLARE" # add
 
 
 class TaskType(str, enum.Enum):

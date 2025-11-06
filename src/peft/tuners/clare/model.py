@@ -76,7 +76,7 @@ class CLAREModel(BaseTuner):
 
         # normal situation
         device_map = self.model.hf_device_map if hasattr(self.model, "hf_device_map") else None
-        new_module = self._create_new_module(peft_config, adapter_name, target, layer_name, layer_id, target_name, device_map=device_map)
+        new_module = self._create_new_module(peft_config, adapter_name, target, layer_name, layer_id, target_name, original_key=current_key, device_map=device_map)
         self._replace_module(parent, target_name, new_module, target)
 
         self._clare_layers.append(new_module)
@@ -110,7 +110,7 @@ class CLAREModel(BaseTuner):
                     module.to(device=weight.device, dtype=weight.dtype)
 
     @staticmethod
-    def _create_new_module(peft_config, adapter_name, target, layer_name, layer_id, base_layer_name, **kwargs):
+    def _create_new_module(peft_config, adapter_name, target, layer_name, layer_id, base_layer_name, original_key, **kwargs):
         key = f"{layer_name}.{layer_id}"
         current_key = f"{key}.{base_layer_name}"
 
@@ -120,14 +120,15 @@ class CLAREModel(BaseTuner):
         num_adapters, num_discriminators = peft_config.structure[key]
         
         # Get module-specific config
-        module_config = peft_config.get_module_config(current_key)
+        module_config = peft_config.get_module_config(original_key)
         if not module_config:
-            raise ValueError(f"No configuration found for module {current_key}")
+            raise ValueError(f"No configuration found for module {original_key}")
             
         # Create CLARELayer with module-specific config
         new_module = CLARELayer(
             base_layer=target,
-            peft_config=module_config,  # Use module-specific config
+            peft_config=peft_config,
+            module_config=module_config,  # Use module-specific config
             adapter_name=adapter_name,
             layer_name=layer_name, 
             layer_id=layer_id,

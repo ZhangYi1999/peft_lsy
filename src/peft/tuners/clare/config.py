@@ -13,7 +13,7 @@ ModuleSelector = Union[str, "re.Pattern[str]"]
 @dataclass
 class FuncAdapterConfig:
     """
-    This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
+    This is the sub-configuration class to store the configuration of a [`CLAREModel`].
 
     Args:
         hidden_dim (`int`):
@@ -35,7 +35,7 @@ class FuncAdapterConfig:
 @dataclass
 class DiscriminatorConfig(draccus.ChoiceRegistry):
     """
-    This is the sub-configuration class to store the configuration of a [`OurAdapterModel`].
+    This is the sub-configuration class to store the configuration of a [`CLAREModel`].
     
     Args:
         
@@ -93,7 +93,7 @@ class CLAREModuleConfig:
 @dataclass
 class CLAREConfig(PeftConfig):
     """
-    This is the configuration class to store the configuration of a [`OurAdapterModel`].
+    This is the configuration class to store the configuration of a [`CLAREModel`].
 
     Args:
         target_modules (`Union[List[CLAREModuleConfig], Dict[str, CLAREModuleConfig], str]`):
@@ -133,7 +133,7 @@ class CLAREConfig(PeftConfig):
     def __post_init__(self) -> None:
         super().__post_init__()
         # Assign to a valid PEFT type so load/save works. It does not alter the tuner name.
-        self.peft_type = PeftType.OUR_ADAPTER
+        self.peft_type = PeftType.CLARE
 
         # Process default configurations first
         self.out_feature_dim = self.out_feature_dim or self.feature_dim

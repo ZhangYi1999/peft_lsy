@@ -93,8 +93,8 @@ class PeftConfigMixin(PushToHubMixin):
 
         output_dict = self.to_dict()
         
-        # handle our adapter config
-        if "discriminator_cfg" in output_dict:
+        # handle clare config
+        if "discriminator_cfg" in output_dict and self.discriminator_cfg is not None:
             output_dict["discriminator_cfg"]["type"] = self.discriminator_cfg.type
         
         # converting set type to list

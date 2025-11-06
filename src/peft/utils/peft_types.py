@@ -45,6 +45,7 @@ class PeftType(str, enum.Enum):
     - SHIRA
     - C3A
     - OUR_ADAPTER
+    - CLARE
     """
 
     PROMPT_TUNING = "PROMPT_TUNING"

@@ -18,7 +18,7 @@ class LoRALayer(nn.Module):
         self.lora_b = nn.ParameterDict({})  # {task_id: up_proj}
         
         # Optional dropout
-        self.lora_dropout = nn.Dropout(p=config.dropout_p) if config.dropout_p > 0 else nn.Identity()
+        self.lora_dropout = nn.Identity() # TODO: nn.Dropout(p=config.dropout_p) if config.dropout_p > 0 else 
         
         # For scaling the LoRA output
         self.scaling = self.alpha / self.r
@@ -53,19 +53,19 @@ class LoRALayer(nn.Module):
                 # lora_b is the up projection: (out_channels, r, 1, ..., 1)
                 self.lora_a[task_id_str] = nn.Parameter(
                     torch.zeros((self.r, self.in_features, *self.kernel_size), 
-                              device=self.base_layer.weight.device)
+                              device=self.base_layer.weight.device, requires_grad=True)
                 )
                 self.lora_b[task_id_str] = nn.Parameter(
                     torch.zeros((self.out_features, self.r, *(1,) * len(self.kernel_size)), 
-                              device=self.base_layer.weight.device)
+                              device=self.base_layer.weight.device, requires_grad=True)
                 )
             else:
                 # For linear layers
                 self.lora_a[task_id_str] = nn.Parameter(
-                    torch.zeros((self.r, self.in_features), device=self.base_layer.weight.device)
+                    torch.zeros((self.r, self.in_features), device=self.base_layer.weight.device, requires_grad=True)
                 )
                 self.lora_b[task_id_str] = nn.Parameter(
-                    torch.zeros((self.out_features, self.r), device=self.base_layer.weight.device)
+                    torch.zeros((self.out_features, self.r), device=self.base_layer.weight.device, requires_grad=True)
                 )
             
             # Initialize with small random values
@@ -79,8 +79,11 @@ class LoRALayer(nn.Module):
         base_output = self.base_layer(x)
         
         # If no adapter_id specified or invalid, return base output
-        if adapter_id < 0 or str(adapter_id) not in self.lora_a:
+        if adapter_id < -1:
             return base_output
+
+        if adapter_id == -1:
+            adapter_id = len(self.lora_a) - 1
             
         # LoRA transformation
         adapter_id_str = str(adapter_id)

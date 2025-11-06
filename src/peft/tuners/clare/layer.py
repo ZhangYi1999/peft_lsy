@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.func import vmap, functional_call, stack_module_state
 import einops
-from .config import CLAREConfig, FuncAdapterConfig
+from .config import CLAREConfig, FuncAdapterConfig, CLAREModuleConfig
 from .discriminator import Discriminator, get_discriminaor_class
 from .base_wrapper import LoRABaseWrapper
 from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
@@ -110,6 +110,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
         self,
         base_layer: nn.Module,
         peft_config: CLAREConfig,
+        module_config: CLAREModuleConfig,
         adapter_name: str,
         layer_name: str,
         layer_id: int,
@@ -119,13 +120,14 @@ class CLARELayer(nn.Module, BaseTunerLayer):
     ) -> None:
         super().__init__()
         self.peft_config = peft_config
+        self.module_config = module_config
         self.adapter_name = adapter_name
         self.layer_name = layer_name
         self.layer_id = layer_id
         self.base_layer_name = base_layer_name
         self.num_adapters = num_adapters
         self.num_discriminators = num_discriminators
-        self.use_lora = self.peft_config.func_adapter_cfg.use_lora
+        self.use_lora = self.module_config.func_adapter_cfg.use_lora
 
         # Initialize adapters structure first, regardless of LoRA or not
         new_func_adapters_list = nn.ModuleList([self._create_adapter() for _ in range(num_adapters)])
@@ -137,7 +139,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             
             self.base_layer = LoRABaseWrapper(base_layer)
             # Initialize LoRA modules using the LoRA parameters from func_adapter_cfg
-            self.base_layer.wrap_linear_layers(self.peft_config.func_adapter_cfg)
+            self.base_layer.wrap_linear_layers(self.module_config.func_adapter_cfg)
             # Add adapters for each task and store them in our_adapter_func_adapters
             for i in range(num_adapters):
                 # Create LoRA adapter in base layer
@@ -227,7 +229,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             adapter_results = []
             for idx, top_1_idx in enumerate(top_1_idx_list):
                 adapter_id = self.our_adapter_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices.item()
-                if not self.peft_config.batch_first:
+                if not self.module_config.batch_first:
                     # Handle time-first format
                     current_x = x[:, idx:idx+1]  # Select single sample while preserving dims
                 else:
@@ -238,7 +240,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 adapter_results.append(current_result)
 
             # Stack results back together
-            if not self.peft_config.batch_first:
+            if not self.module_config.batch_first:
                 return torch.cat(adapter_results, dim=1)  # Concat along batch dimension (dim=1 for time-first)
             else:
                 return torch.cat(adapter_results, dim=0)  # Concat along batch dimension (dim=0)
@@ -299,14 +301,14 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                     y = functional_call(prototype, (params_i, buffers_i), (input_i,))
                     return y
                 
-                if not self.peft_config.batch_first:
+                if not self.module_config.batch_first:
                     adapter_input = einops.rearrange(x, "t b d ... -> b t d ... ")
                 else:
                     adapter_input = x
                 
                 adapter_result = vmap(forward_one_func_adapter)(params, buffers, adapter_input)
 
-                if not self.peft_config.batch_first:
+                if not self.module_config.batch_first:
                     adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
             
             else:
@@ -326,7 +328,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                     func_idx = self.our_adapter_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices
                     
                     # Select single sample while preserving dims
-                    if not self.peft_config.batch_first:
+                    if not self.module_config.batch_first:
                         current_x = x[:, idx:idx+1]  # time-first format
                     else:
                         current_x = x[idx:idx+1]  # batch-first format
@@ -336,7 +338,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                     adapter_results.append(current_result)
 
                 # Stack results back together
-                if not self.peft_config.batch_first:
+                if not self.module_config.batch_first:
                     adapter_result = torch.cat(adapter_results, dim=1)  # Concat along batch dimension (dim=1 for time-first)
                 else:
                     adapter_result = torch.cat(adapter_results, dim=0)  # Concat along batch dimension (dim=0)
@@ -386,17 +388,17 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             # For LoRA, create a dummy adapter that will hold references to LoRA params
             adapter = nn.Module()
             # Will be populated with lora_adapter attribute later
-        elif self.peft_config.use_trainable_copy:
+        elif self.module_config.use_trainable_copy:
             adapter = copy.deepcopy(self.base_layer)
         else:
             adapter = FuncAdapter(
-                self.peft_config.func_adapter_cfg, 
-                self.peft_config.feature_dim, 
-                self.peft_config.out_feature_dim
+                self.module_config.func_adapter_cfg, 
+                self.module_config.feature_dim, 
+                self.module_config.out_feature_dim
             )
         for p in adapter.parameters():
             p.requires_grad = True
-        return FuncAdapterWrapper(self.peft_config, adapter)
+        return FuncAdapterWrapper(self.module_config, adapter)
     
     def _create_lora_adapter(self):
         for name, module in self.named_modules():
@@ -404,8 +406,8 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 pass
 
     def _create_discriminator(self):
-        disc_cls = get_discriminaor_class(self.peft_config.discriminator_cfg.type)
-        return disc_cls(self.peft_config.discriminator_cfg, self.peft_config.feature_dim)
+        disc_cls = get_discriminaor_class(self.module_config.discriminator_cfg.type)
+        return disc_cls(self.module_config.discriminator_cfg, self.module_config.feature_dim)
 
     def add_adapter_and_discriminator(self, new_task_id:int):
         # Create new adapter wrapper in both cases
@@ -429,8 +431,8 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             # Get parameters from all LoRA modules
             adapter_parameter = []
             for lora_module in self.base_layer.lora_modules.values():
-                adapter_parameter.extend(list(lora_module.lora_a[str(new_task_id)].parameters()))
-                adapter_parameter.extend(list(lora_module.lora_b[str(new_task_id)].parameters()))
+                adapter_parameter.append(lora_module.lora_a[str(new_task_id)])
+                adapter_parameter.append(lora_module.lora_b[str(new_task_id)])
         else:
             # Original case
             adapter_parameter = list(new_adapter.parameters())

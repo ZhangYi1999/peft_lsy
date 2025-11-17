@@ -96,6 +96,11 @@ class PeftConfigMixin(PushToHubMixin):
         # handle clare config
         if "discriminator_cfg" in output_dict and self.discriminator_cfg is not None:
             output_dict["discriminator_cfg"]["type"] = self.discriminator_cfg.type
+        for pattern in output_dict["_module_configs"]:
+            if "discriminator_cfg" in output_dict["_module_configs"][pattern] and self._module_configs[pattern].discriminator_cfg is not None:
+                output_dict["_module_configs"][pattern]["discriminator_cfg"]["type"] = self._module_configs[pattern].discriminator_cfg.type
+                if isinstance(output_dict["target_modules"], dict):
+                    output_dict["target_modules"][pattern]["discriminator_cfg"]["type"] = self._module_configs[pattern].discriminator_cfg.type
         
         # converting set type to list
         for key, value in output_dict.items():

@@ -1,4 +1,5 @@
 import abc
+import copy
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
@@ -230,20 +231,11 @@ class AutoEncoderSmall(Discriminator):
             input_feature_dim = feature_dim
 
         
-        self.encoder = nn.Sequential(
-            nn.Linear(input_feature_dim, config.hidden_dim),
-            nn.ReLU()
-        )
+        self.encoder = nn.Linear(input_feature_dim, config.hidden_dim)
 
-        self.decoder = nn.Sequential(
-            nn.Linear(config.hidden_dim, input_feature_dim),
-        )
+        self.activation = nn.ReLU()
 
-    def encode(self, x: Tensor) -> Tensor:
-        return self.encoder(x)
-
-    def decode(self, z: Tensor) -> Tensor:
-        return self.decoder(z)
+        self.decoder = nn.Linear(config.hidden_dim, input_feature_dim)
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
 
@@ -262,8 +254,8 @@ class AutoEncoderSmall(Discriminator):
         else:
             input_feature = x
 
-        latent = self.encode(input_feature)
-        reconstruction = self.decode(latent)
+        latent = self.activation(self.encoder(input_feature))
+        reconstruction = self.decoder(latent)
 
         reconstruction_loss = F.mse_loss(reconstruction, input_feature, reduction="none")
 
@@ -304,6 +296,106 @@ class AutoEncoderSmall(Discriminator):
 
         return training_parameters
 
+
+class BatchedAutoEncoderSmall(nn.Module):
+
+    def __init__(self, config: AutoencoderSmallConfig, autoencoders: nn.ModuleList):
+        super().__init__()
+
+        self.config = config
+
+        self.feature_fusion: bool = config.feature_fusion
+
+        self.autoencoders: nn.ModuleList[AutoEncoderSmall] = autoencoders
+        self.num_autoencoders = len(self.autoencoders)
+
+        # Extract weights and bias
+        encoder_weights = []
+        encoder_bias = []
+        decoder_weights = []
+        decoder_bias = []
+
+        if self.feature_fusion:
+            fusion_layer_weights = []
+            fusion_layer_bias = []
+        
+        for autoencoder in self.autoencoders:
+            encoder_weights.append(copy.deepcopy(autoencoder.encoder.weight.t()))
+            encoder_bias.append(copy.deepcopy(autoencoder.encoder.bias))
+            decoder_weights.append(copy.deepcopy(autoencoder.decoder.weight.t()))
+            decoder_bias.append(copy.deepcopy(autoencoder.decoder.bias))
+
+            if self.feature_fusion:
+                fusion_layer_weights.append(autoencoder.fusion_layer.weight.t())
+                fusion_layer_bias.append(autoencoder.fusion_layer.bias)
+            
+            # autoencoder.cpu()
+
+        # Register as parameters
+        self.encoder_weights = nn.Parameter(torch.stack(encoder_weights, dim=0), requires_grad=False) # (N, D, H)
+        self.encoder_bias = nn.Parameter(torch.stack(encoder_bias, dim=0), requires_grad=False) # (N, H)
+        self.decoder_weights = nn.Parameter(torch.stack(decoder_weights, dim=0), requires_grad=False) # (N, H, D)
+        self.decoder_bias = nn.Parameter(torch.stack(decoder_bias, dim=0), requires_grad=False) # (N, D)
+        if self.feature_fusion:
+            self.fusion_layer_weights = nn.Parameter(torch.stack(fusion_layer_weights, dim=0), requires_grad=False) # (N, T*D, F)
+            self.fusion_layer_bias = nn.Parameter(torch.stack(fusion_layer_bias, dim=0), requires_grad=False) # (N, F) 
+
+    def forward(self, x: Tensor) -> tuple[Tensor, dict]:
+        if x.ndim == 2:
+            expanded_feature = x.unsqueeze(-1) # (B, D) -> (B, 1, D)
+        else:
+            if not self.config.batch_first:
+                expanded_feature = einops.rearrange(x, "t b d ... -> b t d ...") # (B, T, D) 
+            else:
+                expanded_feature = x # (B, T, D)
+        
+        if self.feature_fusion:
+            
+            if self.config.batch_first:
+                flattened_feature = einops.rearrange(expanded_feature, "b t d ... -> b (t d) ...") # (B, T*D)
+            else:
+                flattened_feature = einops.rearrange(expanded_feature, "t b d ... -> b (t d) ...") # (B, T*D)
+                
+            input_feature = torch.einsum("bd, ndf -> nbf", flattened_feature, self.fusion_layer_weights) + self.fusion_layer_bias # (N, B, F), regard F as D -> (N, B, D)
+            input_feature = input_feature.unsqueeze(-1) # (N, B, D) -> (N, B, 1, D)
+
+            latents = torch.einsum("nbtd, ndh -> nbth", input_feature, self.encoder_weights) + self.encoder_bias[:, None, None, :] # (N, B, T, H)
+            latents = torch.relu(latents) # (N, B, T, H)
+        else:
+            input_feature = expanded_feature # (B, T, D)
+
+            latents = torch.einsum("btd, ndh -> nbth", input_feature, self.encoder_weights) + self.encoder_bias[:, None, None, :] # (N, B, T, H)
+            latents = torch.relu(latents) # (N, B, T, H)
+        
+        reconstructions = torch.einsum("nbth, nhd -> nbtd", latents, self.decoder_weights) + self.decoder_bias[:, None, None, :] # (N, B, T, D)
+        reconstruction_losses = (reconstructions - input_feature).pow(2) # MSE loss (N, B, T, D)
+
+        mean_losses = reconstruction_losses.mean(dim=(-2, -1)) # (N, B, T, D) -> (N, B)
+
+        info_dicts = []
+        for i, autoencoder in enumerate(self.autoencoders):
+            info_dict = {
+                "reconstruction": reconstructions[i],
+                "loss": reconstruction_losses[i],
+                "latent": latents[i]
+            }
+
+            if autoencoder.require_z_score:
+                z_score = autoencoder.compute_z_score(mean_losses[i])
+                info_dict["z_score"] = z_score
+            
+            # if autoencoder.require_update_stats and autoencoder.training:
+            #     self.update_stats(mean_losses[i])
+            
+            info_dict["running_mean"] = autoencoder.running_mean
+            info_dict["running_std"] = autoencoder.running_std
+            info_dict["num_batches_tracked"] = autoencoder.num_batches_tracked
+
+            # self.info_dict_keys = info_dict.keys()
+
+            info_dicts.append(info_dict)
+
+        return mean_losses, info_dicts
 
 @DiscriminatorConfig.register_subclass('vae')
 @dataclass

@@ -141,8 +141,8 @@ class CLARELayer(nn.Module, BaseTunerLayer):
 
                         if num_adapters > 0:
                             lora_func_adapter_template.layer_wise_lora_adapters[name.replace(".", "_")] = nn.ModuleDict({
-                                "lora_a" : nn.Linear(lora_wrapped_module.out_proj.in_features, lora_wrapped_module.out_proj.rank, bias=False),
-                                "lora_b" : nn.Linear(lora_wrapped_module.out_proj.rank, lora_wrapped_module.out_proj.out_features, bias=False)
+                                "lora_a" : nn.Linear(lora_wrapped_module.original_layer.out_proj.in_features, lora_wrapped_module.original_layer.out_proj.rank, bias=False),
+                                "lora_b" : nn.Linear(lora_wrapped_module.original_layer.out_proj.rank, lora_wrapped_module.original_layer.out_proj.out_features, bias=False)
                             })
                             lora_func_adapter_template.layer_wise_lora_parameters[name.replace(".", "_")] = nn.ParameterDict({
                                 "lora_a" : nn.Linear(lora_wrapped_module.in_features, lora_wrapped_module.rank, bias=False),

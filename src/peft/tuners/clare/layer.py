@@ -381,3 +381,20 @@ class CLARELayer(nn.Module, BaseTunerLayer):
     @property
     def info_dicts(self):
         return self._info_dicts
+    
+    def __getattr__(self, name):
+        # First, try normal behavior (important!)
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            pass
+
+        # Then search inside base_layer
+        if hasattr(self.base_layer, name):
+            return getattr(self.base_layer, name)
+
+        # Attribute not found
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+

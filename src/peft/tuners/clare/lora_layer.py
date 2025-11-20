@@ -252,6 +252,12 @@ class LoRAMultiheadAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        if self.lora["A"] is None:
+            raise ValueError("Uninitialized lora_a.")
+
+        if self.lora["B"] is None:
+            raise ValueError("Uninitialized lora_b.")
+
         try:
             self.merge()
             result = self.original_layer(x, *args, **kwargs)

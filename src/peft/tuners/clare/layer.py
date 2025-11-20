@@ -10,7 +10,7 @@ import einops
 from .config import CLAREConfig, FuncAdapterConfig, CLAREModuleConfig
 from .discriminator import Discriminator, BatchedAutoEncoderSmall, get_discriminaor_class
 from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
-from .lora_layer import LoRALayer
+from .lora_layer import LoRALinear, LoRAMultiheadAttention
 from .func_adapter import FuncAdapter, LoRAFuncAdapter
 
 STACK_FORWARD = False
@@ -73,7 +73,6 @@ class LoRAFuncAdapterWrapper(nn.Module):
         return self.lora_module(x)
 
 
-
 # ---- Layer wrapper: base + adapter ----
 class CLARELayer(nn.Module, BaseTunerLayer):
     def __init__(
@@ -103,6 +102,12 @@ class CLARELayer(nn.Module, BaseTunerLayer):
         self._base_layer_device = next(self.base_layer.parameters()).device
         self._base_layer_dtype = next(self.base_layer.parameters()).dtype
 
+        def submodule_name_match(submodule_name: str, lora_module_name_list: list[str]) -> bool:
+            for registered_name in lora_module_name_list:
+                if submodule_name == registered_name or submodule_name.startswith(registered_name + "."):
+                    return True
+            return False
+
         # create adapters
         if self.use_lora:
             self.lora_module_name_list = []
@@ -111,22 +116,40 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             lora_func_adapter_template = LoRAFuncAdapter(self.module_config.func_adapter_cfg)
             
             for name, module in self.base_layer.named_modules():
-                # only consider leaf module
-                if len(list(module.children())) == 0:
+                if not submodule_name_match(name, self.lora_module_name_list): 
                     # only conside nn.Linear
                     if isinstance(module, nn.Linear):
                         # record name of lora wrapped module
                         self.lora_module_name_list.append(name)
                         
                         # Replace the original base layer with lora compatiable layer
-                        lora_wrapped_module = LoRALayer(module, self.module_config.func_adapter_cfg)
+                        lora_wrapped_module = LoRALinear(module, self.module_config.func_adapter_cfg)
                         self.base_layer.set_submodule(name, lora_wrapped_module)
 
                         if num_adapters > 0:
-                            lora_func_adapter_template.layer_wise_lora_adapters[name] = nn.ModuleDict({
-                                "lora_a" : nn.Linear(lora_wrapped_module.in_features, lora_wrapped_module.r, bias=False),
-                                "lora_b" : nn.Linear(lora_wrapped_module.r, lora_wrapped_module.out_features, bias=False)
+                            lora_func_adapter_template.layer_wise_lora_adapters[name.replace(".", "_")] = nn.ModuleDict({
+                                "lora_a" : nn.Linear(lora_wrapped_module.in_features, lora_wrapped_module.rank, bias=False),
+                                "lora_b" : nn.Linear(lora_wrapped_module.rank, lora_wrapped_module.out_features, bias=False)
                             })
+                    elif isinstance(module, nn.MultiheadAttention):
+                        # record name of lora wrapped module
+                        self.lora_module_name_list.append(name)
+                        
+                        # Replace the original base layer with lora compatiable layer
+                        lora_wrapped_module = LoRAMultiheadAttention(module, self.module_config.func_adapter_cfg)
+                        self.base_layer.set_submodule(name, lora_wrapped_module)
+
+                        if num_adapters > 0:
+                            lora_func_adapter_template.layer_wise_lora_adapters[name.replace(".", "_")] = nn.ModuleDict({
+                                "lora_a" : nn.Linear(lora_wrapped_module.out_proj.in_features, lora_wrapped_module.out_proj.rank, bias=False),
+                                "lora_b" : nn.Linear(lora_wrapped_module.out_proj.rank, lora_wrapped_module.out_proj.out_features, bias=False)
+                            })
+                            lora_func_adapter_template.layer_wise_lora_parameters[name.replace(".", "_")] = nn.ParameterDict({
+                                "lora_a" : nn.Linear(lora_wrapped_module.in_features, lora_wrapped_module.rank, bias=False),
+                                "lora_b" : nn.Linear(lora_wrapped_module.rank, lora_wrapped_module.out_features, bias=False)
+                            })
+
+
             lora_func_adapter_template.to(dtype=self._base_layer_dtype, device=self._base_layer_device)
 
             for _ in range(num_adapters):
@@ -182,7 +205,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
 
         return losses, info_dicts
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.training:
             # reset the flag
             if not self._stack_discriminator_once_in_eval:
@@ -215,10 +238,10 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             # forward specific adapter
             if self.use_lora:
                 self._activate_lora_adapter(self._forwarded_adapter_id)
-                result = self.base_layer(x)
+                result = self.base_layer(x, **kwargs)
             else:
                 adapter_result = self.clare_func_adapters[self.adapter_name][self._forwarded_adapter_id](x)
-                base_result = self.base_layer(x)
+                base_result = self.base_layer(x, **kwargs)
                 result = base_result + adapter_result
         else:
 
@@ -256,7 +279,16 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 # Process this sample with its best adapter
                 if self.use_lora:
                     self._activate_lora_adapter(_forwarded_adapter_id)
-                    adapter_result[idx] = self.base_layer(current_input)
+                    if self.module_config.batch_first:
+                        current_input = current_input.unsqueeze(dim=0) # (T, D) -> (1, T, D)
+                    else:
+                        current_input = current_input.unsqueeze(dim=1) # (T, D) -> (T, 1, D)
+                    current_output = self.base_layer(current_input, **kwargs)
+                    if self.module_config.batch_first:
+                        current_output = current_output.squeeze(dim=0) # (1, T, D) -> (T, D)
+                    else:
+                        current_output = current_output.squeeze(dim=1) # (T, 1, D) -> (T, D)
+                    adapter_result[idx]= current_output
                 else:
                     adapter_result[idx] = self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id](current_input)
 
@@ -266,7 +298,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             if self.use_lora:
                 result = adapter_result
             else:
-                base_result = self.base_layer(x)
+                base_result = self.base_layer(x, **kwargs)
                 result = base_result + adapter_result
 
         return result
@@ -277,10 +309,8 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             # reload adapters
             for sub_module_name in self.lora_module_name_list:
                 sub_module = self.base_layer.get_submodule(sub_module_name)
-                sub_module.lora["A"] = \
-                    self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id].layer_wise_lora_adapters[sub_module_name]["lora_a"]
-                sub_module.lora["B"] = \
-                    self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id].layer_wise_lora_adapters[sub_module_name]["lora_b"]
+                sub_module.set_lora_adapter(self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id], sub_module_name.replace(".", "_"))
+
             # update _previous_forwarded_adapter_id
             self._previous_forwarded_adapter_id = _forwarded_adapter_id
 
@@ -293,10 +323,20 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 out_features = sub_module.out_features
                 rank = self.module_config.func_adapter_cfg.lora_rank
 
-                new_adapter.layer_wise_lora_adapters[sub_module_name] = nn.ModuleDict({
-                    "lora_a" : nn.Linear(in_features, rank, bias=False),
-                    "lora_b" : nn.Linear(rank, out_features, bias=False)
-                })
+                if isinstance(sub_module, LoRALinear):
+                    new_adapter.layer_wise_lora_adapters[sub_module_name.replace(".", "_")] = nn.ModuleDict({
+                        "lora_a" : nn.Linear(in_features, rank, bias=False),
+                        "lora_b" : nn.Linear(rank, out_features, bias=False)
+                    })
+                elif isinstance(sub_module, LoRAMultiheadAttention):
+                    new_adapter.layer_wise_lora_adapters[sub_module_name.replace(".", "_")] = nn.ModuleDict({
+                        "lora_a" : nn.Linear(sub_module.original_layer.out_proj.in_features, sub_module.original_layer.out_proj.rank, bias=False),
+                        "lora_b" : nn.Linear(sub_module.original_layer.out_proj.rank, sub_module.original_layer.out_proj.out_features, bias=False)
+                    })
+                    new_adapter.layer_wise_lora_parameters[sub_module_name.replace(".", "_")] = nn.ParameterDict({
+                        "lora_a" : nn.Linear(in_features, rank, bias=False),
+                        "lora_b" : nn.Linear(rank, out_features, bias=False)
+                    })
         else:
             new_adapter = self._create_adapter()
             new_adapter.task_id = torch.tensor(new_task_id, dtype=torch.int64)

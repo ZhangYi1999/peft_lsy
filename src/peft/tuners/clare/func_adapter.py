@@ -36,4 +36,7 @@ class LoRAFuncAdapter(nn.Module):
 
         self.layer_wise_lora_adapters = nn.ModuleDict({})
 
+        self.layer_wise_lora_parameters = nn.ParameterDict({})
+
         self.register_buffer("task_id", torch.tensor(-1, dtype=torch.int64))
+

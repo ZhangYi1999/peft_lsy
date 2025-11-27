@@ -62,6 +62,20 @@ class ConvHelper(nn.Module):
 #         else:
 #             return self.func_adapter(x)
 
+def general_set_module(base_layer: nn.Module, submodule_name: str, new_submodule: nn.Module):
+    if submodule_name == '':
+        return "self", new_submodule
+    else:
+        base_layer.set_submodule(submodule_name, new_submodule)
+        return submodule_name, base_layer
+
+
+def general_get_module(base_layer: nn.Module, submodule_name: str):
+    if submodule_name == 'self':
+        return base_layer
+    else:
+        return base_layer.get_submodule(submodule_name)
+
 
 class LoRAFuncAdapterWrapper(nn.Module):
     def __init__(self, input_size, output_size):
@@ -119,12 +133,12 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 if not submodule_name_match(name, self.lora_module_name_list): 
                     # only conside nn.Linear
                     if isinstance(module, nn.Linear):
-                        # record name of lora wrapped module
-                        self.lora_module_name_list.append(name)
-                        
                         # Replace the original base layer with lora compatiable layer
                         lora_wrapped_module = LoRALinear(module, self.module_config.func_adapter_cfg)
-                        self.base_layer.set_submodule(name, lora_wrapped_module)
+                        name, self.base_layer = general_set_module(self.base_layer, name, lora_wrapped_module)
+
+                        # record name of lora wrapped module
+                        self.lora_module_name_list.append(name)
 
                         if num_adapters > 0:
                             lora_func_adapter_template.layer_wise_lora_adapters[name.replace(".", "_")] = nn.ModuleDict({
@@ -132,12 +146,12 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                                 "lora_b" : nn.Linear(lora_wrapped_module.rank, lora_wrapped_module.out_features, bias=False)
                             })
                     elif isinstance(module, nn.MultiheadAttention):
-                        # record name of lora wrapped module
-                        self.lora_module_name_list.append(name)
-                        
                         # Replace the original base layer with lora compatiable layer
                         lora_wrapped_module = LoRAMultiheadAttention(module, self.module_config.func_adapter_cfg)
-                        self.base_layer.set_submodule(name, lora_wrapped_module)
+                        name, self.base_layer = general_set_module(self.base_layer, name, lora_wrapped_module)
+
+                        # record name of lora wrapped module
+                        self.lora_module_name_list.append(name)
 
                         if num_adapters > 0:
                             lora_func_adapter_template.layer_wise_lora_adapters[name.replace(".", "_")] = nn.ModuleDict({
@@ -255,7 +269,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
             self._info_dicts["losses"] = losses.transpose(0, 1) # (n_discriminators, n_envs) -> (n_envs, n_discriminators)
             self._info_dicts["top_1_idx_list"] = top_1_idx_list
 
-            if not self.module_config.batch_first:
+            if not self.module_config.batch_first and x.ndim == 3:
                 adapter_input = einops.rearrange(x, "t b d ... -> b t d ... ")
             else:
                 adapter_input = x
@@ -280,19 +294,19 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 if self.use_lora:
                     self._activate_lora_adapter(_forwarded_adapter_id)
                     if self.module_config.batch_first:
-                        current_input = current_input.unsqueeze(dim=0) # (T, D) -> (1, T, D)
+                        current_input = current_input.unsqueeze(dim=0) # (T, D) -> (1, T, D) / (D) -> (1, D)
                     else:
-                        current_input = current_input.unsqueeze(dim=1) # (T, D) -> (T, 1, D)
+                        current_input = current_input.unsqueeze(dim=-2) # (T, D) -> (T, 1, D) / (D) -> (1, D)
                     current_output = self.base_layer(current_input, **kwargs)
                     if self.module_config.batch_first:
-                        current_output = current_output.squeeze(dim=0) # (1, T, D) -> (T, D)
+                        current_output = current_output.squeeze(dim=0) # (1, T, D) -> (T, D) / (1, D) -> (D)
                     else:
-                        current_output = current_output.squeeze(dim=1) # (T, 1, D) -> (T, D)
+                        current_output = current_output.squeeze(dim=1) # (T, 1, D) -> (T, D) / (1, D) -> (D)
                     adapter_result[idx]= current_output
                 else:
                     adapter_result[idx] = self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id](current_input)
 
-            if not self.module_config.batch_first:
+            if not self.module_config.batch_first and adapter_result.ndim == 3:
                 adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
         
             if self.use_lora:
@@ -308,7 +322,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
         if self._previous_forwarded_adapter_id != _forwarded_adapter_id:
             # reload adapters
             for sub_module_name in self.lora_module_name_list:
-                sub_module = self.base_layer.get_submodule(sub_module_name)
+                sub_module = general_get_module(self.base_layer, sub_module_name)
                 sub_module.set_lora_adapter(self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id], sub_module_name.replace(".", "_"))
 
             # update _previous_forwarded_adapter_id
@@ -318,7 +332,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
         if self.use_lora:
             new_adapter = LoRAFuncAdapter(self.module_config.func_adapter_cfg)
             for sub_module_name in self.lora_module_name_list:
-                sub_module = self.base_layer.get_submodule(sub_module_name)
+                sub_module = general_get_module(self.base_layer, sub_module_name)
                 in_features = sub_module.in_features
                 out_features = sub_module.out_features
                 rank = self.module_config.func_adapter_cfg.lora_rank

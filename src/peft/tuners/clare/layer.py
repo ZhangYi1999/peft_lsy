@@ -211,13 +211,23 @@ class CLARELayer(nn.Module, BaseTunerLayer):
 
     def _forward_discriminators(self, x: torch.Tensor):
 
-        if self._stack_discriminator_once_in_eval:
-            new_batched_discriminator = BatchedAutoEncoderSmall(self.module_config.discriminator_cfg, self.clare_discriminators[self.adapter_name])
-            new_batched_discriminator.to(device=self._base_layer_device, dtype=self._base_layer_dtype)
-            self._stacked_discriminator[self.adapter_name] = new_batched_discriminator
-            self._stack_discriminator_once_in_eval = False
+        # if self._stack_discriminator_once_in_eval:
+        #     new_batched_discriminator = BatchedAutoEncoderSmall(self.module_config.discriminator_cfg, self.clare_discriminators[self.adapter_name])
+        #     new_batched_discriminator.to(device=self._base_layer_device, dtype=self._base_layer_dtype)
+        #     self._stacked_discriminator[self.adapter_name] = new_batched_discriminator
+        #     self._stack_discriminator_once_in_eval = False
 
-        losses, info_dicts = self._stacked_discriminator[self.adapter_name](x)
+        # losses, info_dicts = self._stacked_discriminator[self.adapter_name](x)
+
+        losses = []
+        info_dicts = []
+
+        for discriminator in self.clare_discriminators[self.adapter_name]:
+            loss, info_dict = discriminator(x)
+            losses.append(loss)
+            info_dicts.append(info_dict)
+
+        losses = torch.stack(losses, dim=0)
 
         return losses, info_dicts
 
@@ -333,6 +343,7 @@ class CLARELayer(nn.Module, BaseTunerLayer):
     def add_adapter_and_discriminator(self, new_task_id:int):
         if self.use_lora:
             new_adapter = LoRAFuncAdapter(self.module_config.func_adapter_cfg)
+            new_adapter.task_id = torch.tensor(new_task_id, dtype=torch.int64)
             for sub_module_name in self.lora_module_name_list:
                 sub_module = general_get_module(self.base_layer, sub_module_name)
                 in_features = sub_module.in_features

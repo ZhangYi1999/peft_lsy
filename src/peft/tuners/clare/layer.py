@@ -212,7 +212,9 @@ class CLARELayer(nn.Module, BaseTunerLayer):
     def _forward_discriminators(self, x: torch.Tensor):
 
         if self._stack_discriminator_once_in_eval:
-            self._stacked_discriminator[self.adapter_name] = BatchedAutoEncoderSmall(self.module_config.discriminator_cfg, self.clare_discriminators[self.adapter_name])
+            new_batched_discriminator = BatchedAutoEncoderSmall(self.module_config.discriminator_cfg, self.clare_discriminators[self.adapter_name])
+            new_batched_discriminator.to(device=self._base_layer_device, dtype=self._base_layer_dtype)
+            self._stacked_discriminator[self.adapter_name] = new_batched_discriminator
             self._stack_discriminator_once_in_eval = False
 
         losses, info_dicts = self._stacked_discriminator[self.adapter_name](x)

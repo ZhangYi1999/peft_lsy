@@ -207,7 +207,9 @@ class CLARELayer(nn.Module, BaseTunerLayer):
     
     def _create_discriminator(self):
         disc_cls = get_discriminaor_class(self.module_config.discriminator_cfg.type)
-        return disc_cls(self.module_config.discriminator_cfg, self.module_config.feature_dim)
+        new_dis = disc_cls(self.module_config.discriminator_cfg, self.module_config.feature_dim)
+        new_dis.to(device=self._base_layer_device, dtype=self._base_layer_dtype)
+        return new_dis
 
     def _forward_discriminators(self, x: torch.Tensor):
 

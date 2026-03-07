@@ -8,7 +8,8 @@ import torch.nn as nn
 from torch.func import vmap, functional_call, stack_module_state
 import einops
 from .config import CLAREConfig, FuncAdapterConfig, CLAREModuleConfig
-from .discriminator import Discriminator, BatchedAutoEncoderSmall, get_discriminaor_class
+from .discriminator import (Discriminator, BatchedAutoEncoder, BatchedLinearMatrix,
+                            create_batched_discriminator, get_discriminaor_class)
 from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
 from .lora_layer import LoRALinear, LoRAMultiheadAttention
 from .func_adapter import FuncAdapter, LoRAFuncAdapter
@@ -212,26 +213,27 @@ class CLARELayer(nn.Module, BaseTunerLayer):
         return new_dis
 
     def _forward_discriminators(self, x: torch.Tensor):
+        discriminators = self.clare_discriminators[self.adapter_name]
 
-        # if self._stack_discriminator_once_in_eval:
-        #     new_batched_discriminator = BatchedAutoEncoderSmall(self.module_config.discriminator_cfg, self.clare_discriminators[self.adapter_name])
-        #     new_batched_discriminator.to(device=self._base_layer_device, dtype=self._base_layer_dtype)
-        #     self._stacked_discriminator[self.adapter_name] = new_batched_discriminator
-        #     self._stack_discriminator_once_in_eval = False
+        # On the first eval call after a training phase, try to build a batched discriminator
+        if self._stack_discriminator_once_in_eval:
+            batched = create_batched_discriminator(discriminators)
+            if batched is not None:
+                batched.to(self._base_layer_device, dtype=self._base_layer_dtype)
+                self._stacked_discriminator[self.adapter_name] = batched
+            self._stack_discriminator_once_in_eval = False
 
-        # losses, info_dicts = self._stacked_discriminator[self.adapter_name](x)
+        if self.adapter_name in self._stacked_discriminator:
+            return self._stacked_discriminator[self.adapter_name](x)  # (N, B), list[dict]
 
+        # Sequential fallback (VAE, RND, mixed types, or LoRA AutoEncoder)
         losses = []
         info_dicts = []
-
-        for discriminator in self.clare_discriminators[self.adapter_name]:
+        for discriminator in discriminators:
             loss, info_dict = discriminator(x)
             losses.append(loss)
             info_dicts.append(info_dict)
-
-        losses = torch.stack(losses, dim=0)
-
-        return losses, info_dicts
+        return torch.stack(losses, dim=0), info_dicts
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.training:

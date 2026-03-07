@@ -297,30 +297,32 @@ class CLARELayer(nn.Module, BaseTunerLayer):
                 B, T = adapter_input.shape[:2]
                 adapter_output_shape = (B, T, self.module_config.out_feature_dim)
 
-            # Process each sample individually
             adapter_result = torch.zeros(adapter_output_shape, device=adapter_input.device, dtype=adapter_input.dtype)
 
+            # Group sample indices by routed adapter to enable batched forwarding
+            adapter_groups: dict[int, list[int]] = {}
             for idx, top_1_idx in enumerate(top_1_idx_list):
-                _forwarded_adapter_id = self.clare_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices.item()
-                
-                # Select single sample while preserving dims
-                current_input = adapter_input[idx]
-                
-                # Process this sample with its best adapter
+                adapter_id = self.clare_discriminators[self.adapter_name][top_1_idx].connected_adapter_indices.item()
+                if adapter_id not in adapter_groups:
+                    adapter_groups[adapter_id] = []
+                adapter_groups[adapter_id].append(idx)
+
+            for adapter_id, sample_indices in adapter_groups.items():
+                # batch_input is (K, ...) in batch-first layout (adapter_input was normalized above)
+                batch_input = adapter_input[sample_indices]
+
                 if self.use_lora:
-                    self._activate_lora_adapter(_forwarded_adapter_id)
-                    if self.module_config.batch_first:
-                        current_input = current_input.unsqueeze(dim=0) # (T, D) -> (1, T, D) / (D) -> (1, D)
+                    self._activate_lora_adapter(adapter_id)
+                    if adapter_input.ndim == 3 and not self.module_config.batch_first:
+                        # base_layer expects (T, K, D); adapter_input was rearranged to (B, T, D) earlier
+                        batch_output = self.base_layer(batch_input.transpose(0, 1), **kwargs).transpose(0, 1)
                     else:
-                        current_input = current_input.unsqueeze(dim=-2) # (T, D) -> (T, 1, D) / (D) -> (1, D)
-                    current_output = self.base_layer(current_input, **kwargs)
-                    if self.module_config.batch_first:
-                        current_output = current_output.squeeze(dim=0) # (1, T, D) -> (T, D) / (1, D) -> (D)
-                    else:
-                        current_output = current_output.squeeze(dim=1) # (T, 1, D) -> (T, D) / (1, D) -> (D)
-                    adapter_result[idx]= current_output
+                        # 2D input (K, D) or 3D batch_first (K, T, D): pass directly
+                        batch_output = self.base_layer(batch_input, **kwargs)
+                    adapter_result[sample_indices] = batch_output
                 else:
-                    adapter_result[idx] = self.clare_func_adapters[self.adapter_name][_forwarded_adapter_id](current_input)
+                    batch_output = self.clare_func_adapters[self.adapter_name][adapter_id](batch_input)
+                    adapter_result[sample_indices] = batch_output
 
             if not self.module_config.batch_first and adapter_result.ndim == 3:
                 adapter_result = einops.rearrange(adapter_result, "b t d ... -> t b d ... ")
